@@ -4,9 +4,9 @@ Create, schedule, and run a containerized data pipeline in Kubernetes.
 
 ## Overview
 
-In this project you will design, containerize, schedule, and operate a real data pipeline running inside a Kubernetes cluster on AWS. The pipeline fetches live electricity generation data from a public API once per hour, persists each reading in a MongoDB database, regenerates a visualization of the accumulating time series, and publishes both the raw data and the plot to a public S3 website.
+In this project you will design, containerize, schedule, and operate a real data pipeline running inside a Kubernetes cluster on AWS. A working sample application is provided that tracks the International Space Station every 15 minutes, records its position and altitude in DynamoDB, and detects orbital burns when the altitude jumps significantly. You will study how that pipeline works, then build your own completely different data application that collects data on a schedule, persists it, and publishes an evolving plot to a public S3 website.
 
-Once set up, your job should run for at least 72 hours, collecting 72 data points.
+Your pipeline should run for at least 72 hours, collecting at least 72 data points.
 
 ### Learning Objectives
 
@@ -14,183 +14,203 @@ By the end of this project you will be able to wrangle all the elements of a wor
 
 1. **Provision cloud infrastructure** — launch and configure an EC2 instance, attach an Elastic IP and IAM role, and enable S3 static website hosting.
 2. **Deploy and operate Kubernetes** — install K3S, inspect cluster state with `kubectl`, and understand namespaces, pods, deployments, and jobs.
-3. **Containerize a Python application** — write a `Dockerfile`, build a multi-stage or single-stage image, and push it to a public container registry (GHCR).
+3. **Containerize a Python application** — write a `Dockerfile`, build a single-stage image, and push it to a public container registry (GHCR).
 4. **Schedule work with CronJobs** — define a Kubernetes `CronJob` manifest, control its schedule, and retrieve logs from completed job pods.
 5. **Manage secrets securely** — store API keys as Kubernetes Secrets and inject them as environment variables so sensitive values never appear in code or YAML files.
-6. **Persist data with a StatefulSet and Persistent Volumes** — deploy MongoDB inside the cluster, understand why StatefulSets differ from Deployments, and query stored documents with `mongosh`.
-7. **Consume a REST API programmatically** — authenticate with an API key, parse JSON responses, and handle incremental data collection across repeated runs.
-8. **Generate and publish data & visualizations** — produce a rolling time-series plot with `seaborn`, overwrite it on each pipeline run, and serve it via S3 website hosting.
+6. **Persist data in DynamoDB** — create a DynamoDB table with a partition key and sort key, write items from a containerized job, and query for the most recent entry.
+7. **Consume a REST API programmatically** — parse JSON responses and handle incremental data collection across repeated runs.
+8. **Generate and publish data visualizations** — produce an evolving time-series plot with `seaborn`, overwrite it on each pipeline run, and serve it via S3 website hosting.
+
+---
 
 ## Setup
 
-1. **S3 Bucket** - Create a new bucket for this project, enable it as a website, and make all files within it publicly readable. Do this by following Steps 1 and 2 in [this documentation from AWS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/WebsiteAccessPermissionsReqd.html). Bucket website settings will give you a unique http:// address to your bucket.
-2. **EC2 Instance** - Create a `t3.large` Ubuntu 24.04LTS instance with a 30GB boot volume (not a secondary EBS volume). Attach an Elastic IP so that your host address remains consistent. Attach a Security Group that allows full access to ports 22, 80, 8000, and 8080. Give the instance an IAM Role with full access to GET and PUT objects in the bucket created above.
-3. **Install K3S** - Either by hand or via bootstrapping, install a lightweight, simplified version of Kubernetes known as K3S. This single command-line installs and runs that software:
-    ```
-    curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
-    ```
-    Note that if you run this command via bootstrapping, your `root` user will have access to the cluster, but it can also be interactively run as the `ubuntu` user, who would then have access to the cluster. This will be apparent because the "controlling" user will have a `~/.kube/config` directory and file.
-4. **Check the Status of Kubernetes** - Run the following commands to learn about your new single-node Kubernetes deployment:
-    - `kubectl cluster-info`
-    - `kubectl get namespaces`
-    - `kubectl get deployments -A` - across all namespaces
-    - `kubectl get pods` - for the default namespace
-    - `kubectl get pods -A` - for all namespaces
-5. **Test a Simple Scheduled Job** - Use code from the file `simple-job.yaml` in this directory and write it to a file in your EC2 instance. Note this job executes a simple command each time it runs, a "Hello" with a datetime stamp.
+### 1. S3 Bucket
 
-    Submit the CronJob with this command in the instance:
-    ```
-    kubectl apply -f simple-job.yaml
-    ```
-    Then wait a few minutes to be sure a job scheduled every 5 minutes should have run. (Hint: use the `date` command to see the server's time). You can see a list of either running or recently run `Job` pods in the default namespace with:
-    ```
-    ubuntu@1.2.3.4:~$ kubectl get pods
-    NAME                           READY   STATUS      RESTARTS   AGE
-    hello-cronjob-29582745-qdzc9   0/1     Completed   0          5m37s
-    hello-cronjob-29582750-f2l9t   0/1     Completed   0          37s
-    ```
-    To see the output of a completed job, just copy the pod name and use the `logs` sub-command:
-    ```
-    ubuntu@1.2.3.4:~$ kubectl logs hello-cronjob-29582750-f2l9t
-    Hello from CronJob - Tue Mar 31 13:50:01 UTC 2026 
-    ```
-    If you get these results, your K3S cluster and your job are running perfectly! You can now delete the test job with:
-    ```
-    kubectl delete -f simple-job.yaml
-    ```
-    
-> **WHOA THERE** - Why are you making us create our own Kubernetes cluster? Why note use the one we used in class, or our laptops, or the one UVA runs?
->
-> I will admit that it is fundamentally wasteful to spin up a dedicated EC2 instance for a single K8S scheduled job. But on the other hand your laptop doesn't stay up and running 24/7 or you take it to other classes. I also wanted you to have the full experience of seeing K8S from the admin side, using basic `kubectl` commands, and having a project that makes use of pods, jobs, secrets, and more. 
+Create a new bucket for this project, enable it as a website, and make all files within it publicly readable. Follow Steps 1 and 2 in [this AWS documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/WebsiteAccessPermissionsReqd.html). The bucket website settings will give you a unique `http://` address you will use as your deliverable URL.
 
+### 2. EC2 Instance
 
-## Sample Data Application
+Create a `t3.large` Ubuntu 24.04 LTS instance with a 30GB boot volume. Attach an Elastic IP so your host address stays consistent. Attach a Security Group that allows inbound access on ports 22, 80, 8000, and 8080. Give the instance an IAM Role with:
+- **S3**: `PutObject`, `GetObject` on your website bucket
+- **DynamoDB**: `PutItem`, `GetItem`, `Query` on your tracking table
 
-The pipeline below will collect **hourly US electricity generation data by fuel type** from the [**EIA Open Data API**](https://www.eia.gov/opendata/). Each run fetches the most recent hourly snapshot for a balancing authority of your choice (e.g. PJM, MISO, ERCOT), stores it in MongoDB, regenerates a rolling plot of the full time series, and pushes both the raw data and the plot image to your S3 website bucket. After 72 runs (over 72 hours) you will have a complete three-day picture of how your region's grid mixed solar, wind, gas, coal, nuclear, and hydro power generation.
+### 3. Install K3S
 
-### 1. Register for an EIA API Key
+Either by hand or via bootstrapping, install K3S — a lightweight Kubernetes distribution:
 
-1. Go to [https://www.eia.gov/opendata/](https://www.eia.gov/opendata/) and click **Register**.
-2. Fill in your name, email address, and organization (your university is fine).
-3. An API key is emailed to you within a few minutes. It looks like a 32-character alphanumeric string.
-4. Test it in a browser — replace `YOUR_KEY` below and confirm you get JSON back:
-    ```
-    https://api.eia.gov/v2/electricity/rto/fuel-type-data/data/?api_key=YOUR_KEY&frequency=hourly&data[0]=value&facets[respondent][]=PJM&sort[0][column]=period&sort[0][direction]=desc&length=1
-    ```
-
-**Balancing authority options** — pick one and use it consistently throughout your project:
-
-| Code | Region |
-|------|--------|
-| PJM  | Mid-Atlantic + Midwest |
-| MISO | Midcontinent |
-| ERCO | Texas (ERCOT) |
-| NYIS | New York |
-| CISO | California |
-| ISNE | New England |
-| SWPP | Southwest Power Pool |
-
-### 2. Store the API Key as a Kubernetes Secret
-
-Never put API keys directly in a YAML file or a Docker image. Kubernetes Secrets store sensitive values separately and inject them as environment variables at runtime.
-
-Create the secret from the command line on your EC2 instance:
-```
-kubectl create secret generic eia-secret \
-  --from-literal=EIA_API_KEY=your_key_here
+```bash
+curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
 ```
 
-Verify the secret was created (Kubernetes will not show the value, only that the key exists):
-```
-kubectl get secret eia-secret
-kubectl describe secret eia-secret
-```
+If you run this during instance bootstrapping, the `root` user will have cluster access. Run it interactively as `ubuntu` and that user will have access instead. Access is confirmed by the presence of `~/.kube/config`.
 
-To inspect the stored value if needed:
-```
-kubectl get secret eia-secret -o jsonpath='{.data.EIA_API_KEY}' | base64 --decode
-```
+### 4. Check the Status of Kubernetes
 
-### 3. How the Secret Flows into the CronJob
+Run these commands to verify your cluster is up:
 
-In `pipeline-job.yaml` the CronJob spec references the secret by name. Kubernetes injects it as an environment variable into the container at startup — your Python script reads it with `os.environ["EIA_API_KEY"]` and the key value never appears in any file on disk:
-
-```yaml
-containers:
-  - name: pipeline
-    image: ghcr.io/USERNAME/ds5220-pipeline:latest
-    env:
-      - name: EIA_API_KEY
-        valueFrom:
-          secretKeyRef:
-            name: eia-secret      # the Secret object created above
-            key: EIA_API_KEY      # the key within that Secret
-      - name: EIA_RESPONDENT
-        value: "PJM"              # plain env vars go here (not secret)
-      - name: S3_BUCKET
-        value: "your-bucket-name"
+```bash
+kubectl cluster-info
+kubectl get namespaces
+kubectl get pods -A
+kubectl get nodes
 ```
 
-Note that `S3_BUCKET` and `EIA_RESPONDENT` are not secrets — they go directly in the spec as plain `value:` fields. Only the API key uses `secretKeyRef`. Your EC2 instance's IAM role already grants S3 access, so no AWS credentials need to appear anywhere.
+### 5. Test a Simple Scheduled Job
 
-For local testing you can use [**MongoDB Atlas**](), a free MongoDB provider, and set a local `ENV` variable to provide the `MONGO_URI` given to you by Atlas, along with the other `ENV` variables required by that script. Runs of `python fetch.py` should generate output files, ship them to S3, and insert data into Mongo.
+Apply the provided `simple-job.yaml` to confirm scheduling works end-to-end:
 
-
-
-### 4. Build and Push Your Pipeline Container
-
-Your pipeline code lives in a `pipeline/` subdirectory. After writing `fetch.py` and a `Dockerfile`, build and push the image to GHCR so Kubernetes can pull it, or set up GitHub Actions to build and push on your behalf.
-
-This presents an obstacle: If your local computer has an `amd64` chip (not a newer Mac), you can build and push your pipeline container by hand. But if your chip is `arm64` then you need to figure out a method for building an `amd64` based container image.
-
-> **HINT**: [Lab 6](https://github.com/nmagee/fastapi-demo/blob/main/LAB.md) walks you through these steps.
-
-```
-# from an amd64 machine
-cd pipeline/
-docker login ghcr.io   # asks for your github username and a PAT token
-docker build -t ghcr.io/USERNAME/ds5220-pipeline:latest .
-docker push username/ds5220-pipeline:latest
+```bash
+kubectl apply -f simple-job.yaml
 ```
 
-Once pushed, find the container image listed under "Packages" in your GitHub profile page. Under "Package Settings" change its visibility settings to "Public". You will only need to set this once.
+Wait a few minutes (the job fires every 5 minutes), then check for completed pods:
 
-The container image must be publicly available for your Kubernetes cluster to pull it. (Note: there are ways of using another K8S Secret so that K8S can pull private images, but we'll save that for another course)
-
-### RECAP - Grab a cup of coffee
-
-You have now created and configured:
-
-
-1. A website-enabled S3 bucket.
-2. An EC2 instance running Kubernetes.
-3. A MongoDB database to store data with a web UI to browse the database.
-4. A data ingestion job with an API key.
-5. A public container image containing that job.
-
-You are now ready to publish your job on a schedule.
-
-### 5. Deploy the Pipeline CronJob
-
-Once your image is pushed and the EIA secret exists in the cluster:
-```
-kubectl apply -f pipeline-job.yaml
+```bash
+kubectl get pods
 ```
 
-Monitor runs:
 ```
+NAME                           READY   STATUS      RESTARTS   AGE
+hello-cronjob-29582745-qdzc9   0/1     Completed   0          5m37s
+hello-cronjob-29582750-f2l9t   0/1     Completed   0          37s
+```
+
+Read the output of a completed pod:
+
+```bash
+kubectl logs hello-cronjob-29582750-f2l9t
+# Hello from CronJob - Tue Mar 31 13:50:01 UTC 2026
+```
+
+Once confirmed, clean up the test job:
+
+```bash
+kubectl delete -f simple-job.yaml
+```
+
+> **Why are we running our own Kubernetes cluster?**
+> It is wasteful to spin up a dedicated EC2 instance for a single scheduled job — but your laptop isn't running 24/7, and I want you to experience Kubernetes from the admin side: provisioning it yourself, using `kubectl` directly, and seeing pods, jobs, secrets, and persistent storage all working together in a real cluster.
+
+---
+
+## Sample Data Application — ISS Reboost Tracker
+
+The sample application in the `iss-reboost/` directory tracks the **International Space Station** every 15 minutes. On each run it:
+
+1. Calls the [wheretheiss.at](https://api.wheretheiss.at/v1/satellites/25544) API to get the ISS's current latitude, longitude, altitude, and velocity — no API key required.
+2. Queries DynamoDB for the most recent previous entry and computes the altitude delta.
+3. Labels the trend: `ASCENDING`, `DESCENDING`, `STABLE`, or `ORBITAL_BURN` (altitude gain ≥ 1 km, indicating a reboost maneuver).
+4. Writes the full record to DynamoDB.
+
+### Create the DynamoDB Table
+
+Before deploying the job, create the table from the AWS CLI on your EC2 instance or local machine:
+
+```bash
+aws dynamodb create-table \
+  --table-name iss-tracking \
+  --attribute-definitions \
+    AttributeName=satellite_id,AttributeType=S \
+    AttributeName=timestamp,AttributeType=S \
+  --key-schema \
+    AttributeName=satellite_id,KeyType=HASH \
+    AttributeName=timestamp,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --region us-east-1
+```
+
+The **partition key** is `satellite_id` (always `"ISS"`) and the **sort key** is `timestamp` (ISO 8601 UTC string). The sort key keeps all records in chronological order and makes it trivial to retrieve the most recent entry with a single `Query`.
+
+### Build and Push the Container
+
+A published image already exists (see the YAML file) but if you want to build and push it yourself, see below. Remember `arm64` vs. `amd64` architecture (Mac users), so you may need to use a GitHub Action for builds (See Lab 6).
+
+```bash
+cd iss/
+docker login ghcr.io        # GitHub username + Personal Access Token
+docker build -t ghcr.io/USERNAME/ds5220-iss:latest .
+docker push ghcr.io/USERNAME/ds5220-iss:latest
+```
+
+Under **Packages** in your GitHub profile, find the image and set its visibility to **Public** so Kubernetes can pull it.
+
+### Deploy the ISS CronJob
+
+Edit `iss-job.yaml` and replace `USERNAME` with your GitHub username, then apply it:
+
+```bash
+kubectl apply -f iss-job.yaml
+```
+
+The job fires every 15 minutes. Monitor it:
+
+```bash
 kubectl get cronjobs
 kubectl get pods
 kubectl logs <pod-name>
 ```
 
-Confirm that your hourly jobs are running (the `pods` output will confirm a `Completed` status, and the `logs` output is most helpful to check for errors).
+A healthy log line looks like:
+
+```
+ISS | alt=415.823 km | delta=-0.031 km | DESCENDING    | lat=21.4521 | lon=-143.2918 | visibility=daylight
+```
+
+An orbital burn looks like:
+
+```
+ISS | alt=417.614 km | delta=+2.103 km | ORBITAL_BURN  | lat=34.1124 | lon=12.0043 | visibility=eclipsed  *** ORBITAL BURN DETECTED ***
+```
+
+Query your data directly from the CLI to verify accumulation:
+
+```bash
+aws dynamodb query \
+  --table-name iss-tracking \
+  --key-condition-expression "satellite_id = :id" \
+  --expression-attribute-values '{":id": {"S": "ISS"}}' \
+  --max-items 5 \
+  --region us-east-1
+```
+
+---
 
 ## Your Data Application
 
-Next, find another data source that changes at least hourly **and write a new, completely different data application**. It should take roughly the same general form as the sample above - a containerized task that runs on a schedule (at least 1x per hour for 72 hours), and renders data and a single, evolving, plot back to S3. It is not required that your new data application use an API key. However, if you want to connect to an external database such as MongoDB Atlas, simply pass connection information into K8S as a secret and consume that secret within your pod as an environment variable.
+Now build your own data pipeline. It should take a similar form to the ISS sample — a containerized Python script running on a Kubernetes CronJob schedule — but track completely different data. Requirements:
 
-Some suggestions of other data sources:
+- Collects data at least once per hour for at least 72 hours (≥ 72 data points)
+- Persists data across runs (DynamoDB, S3 Parquet, or similar)
+- Generates an evolving plot and publishes it to your S3 website bucket as `plot.png`
+- Generates an evolving data file and published it to your S3 website bucket as `data.csv` or `data.parquet`.
+- Lives in its own subdirectory with its own `Dockerfile` and `requirements.txt`
+
+### If Your API Requires a Key
+
+Never put API keys in a YAML file or Docker image. Store them as a Kubernetes Secret:
+
+```bash
+kubectl create secret generic my-api-secret \
+  --from-literal=API_KEY=your_key_here
+```
+
+Reference it in your CronJob spec:
+
+```yaml
+env:
+  - name: API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: my-api-secret
+        key: API_KEY
+  - name: S3_BUCKET
+    value: "your-bucket-name"     # plain env var — not a secret
+```
+
+Your Python script reads it with `os.environ["API_KEY"]`. The key value never appears in any file on disk. Your EC2 IAM role already grants S3 and DynamoDB access, so no AWS credentials are needed anywhere.
+
+### Data Source Ideas
 
 - **Open-Meteo Weather API** — fetch hourly temperature, wind speed, precipitation, or cloud cover for any lat/lon without an API key. [https://open-meteo.com/en/docs](https://open-meteo.com/en/docs)
 - **USGS Water Services** — stream gauge readings updated every 15 minutes for thousands of rivers and streams across the US. [https://waterservices.usgs.gov/rest/IV-Service.html](https://waterservices.usgs.gov/rest/IV-Service.html)
@@ -200,27 +220,27 @@ Some suggestions of other data sources:
 - **CoinGecko Crypto Prices** — free, no-key-required endpoint returning current prices, market cap, and 24-hour volume for any cryptocurrency. [https://www.coingecko.com/en/api/documentation](https://www.coingecko.com/en/api/documentation)
 - **Transport for London (TfL) Unified API** — live crowding levels, arrival predictions, and disruptions across the London Underground and bus network. [https://api.tfl.gov.uk/](https://api.tfl.gov.uk/)
 
-Just like the sample data application above, your own data application should store output data and a plot in your S3 bucket website.
+---
 
 ## Deliverables
 
-### All Students
-
 Submit the following in the Canvas assignment:
 
-1. **EIA Energy Plot URL** — the public `http://` URL to your `plot.png` file served from your S3 website bucket (e.g., `http://your-bucket-name.s3-website-us-east-1.amazonaws.com/plot.png`). The plot must show at least 72 hours of hourly readings across multiple fuel types. Paste the URL so it can be opened directly in a browser — if the image does not load, the deliverable will not be graded.
+1. **Your Data Application Plot URL** — the public `http://` URL to your `plot.png` served from your S3 website bucket (e.g., `http://your-bucket-name.s3-website-us-east-1.amazonaws.com/plot.png`). The plot must show at least 72 hours of data. Paste the URL directly — if the image does not load it will not be graded.
 
-2. **Your Data Application Plot URL** - the public `http://` URL to your `plot2.png` file served from your S3 website bucket (e.g., `http://your-bucket-name.s3-website-us-east-1.amazonaws.com/plot2.png`). The plot must show at least 72 hours of hourly readings across multiple data points. Paste the URL so it can be opened directly in a browser.
+2. **Your Data Application Repo URL** — the public GitHub URL to your pipeline code. The repository must include the Python script, a `Dockerfile`, and a `requirements.txt`.
 
-3. **Your Data Application Repo URL** - the public GitHub URL to the code for your custom data application. That repository should include the application code itself (in Python), a Dockerfile, and any requirements.txt or supporting files.
+3. **Canvas Quiz** — answer the short-answer questions posted in Canvas. These will ask you to reflect on what you built, including:
+    - Which data source you chose and why.
+    - What you observe in the data — any patterns, spikes, or surprises over the 72-hour window.
+    - How Kubernetes Secrets differ from plain environment variables and why that distinction matters.
+    - How your CronJob pods gain permission to read/write to AWS services without credentials appearing in any file.
+    - One thing you would do differently if you were building this pipeline for a real production system.
 
 ### Graduate Students
 
-In addition to the above requirements:
+In addition to the above, submit a short written response (one paragraph each) to the following:
 
-1. **Submit answers to the following questions** in a markdown or PDF file uploaded to Canvas. Do not consult generative AI for these answers.
-
-    - In the sample data application above, data persists outside of the pods through the use of S3. If this were a higher-frequency application (hundreds of times per minute) how might you persist the data in a more performant way? (One paragraph)
-    - How do your CronJob pods gain permission to read/write to Amazon S3? How does this differ from running a container locally using Docker? (One paragraph)
-    - How Kubernetes Secrets differ from plain environment variables and why does that distinction matter? (One paragraph)
-    - What is one thing that you might do differently if you were building this pipeline for real production use? (One paragraph)
+- In the ISS sample application, data is persisted in DynamoDB. If this were a much higher-frequency application (hundreds of writes per minute), what changes would you make to the persistence strategy and why?
+- The ISS tracker detects orbital burns by comparing consecutive altitude readings. Describe at least one way this detection logic could produce a false positive, and how you would make it more robust.
+- What is the tradeoff between using DynamoDB (as in the ISS app) versus S3 Parquet (as in the `pipeline/` directory) for storing time-series data from a scheduled job? When would you choose one over the other?
