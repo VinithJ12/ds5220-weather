@@ -104,10 +104,13 @@ flowchart LR
     GHCR["📦 GHCR\nContainer Registry"]
 
     subgraph AWS["☁️  AWS"]
+    style AWS fill:#fff,stroke:#e76f51,color:#333
         IAM["🔑 IAM Role\nattached to EC2"]
 
         subgraph EC2["EC2 Instance"]
+        style EC2 fill:#eee,stroke:#e76f51,color:#000
             subgraph K3S["K3S Kubernetes"]
+            style K3S fill:#eee,stroke:#e76f51,color:#000
                 CRON["⏱️ CronJob\nevery 15 minutes"]
                 POD["🐳 Pod\napp.py"]
             end
