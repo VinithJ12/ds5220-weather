@@ -28,4 +28,4 @@ jobs:
           context: ./weather
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/ds5220-weather:latest
+          tags: ghcr.io/vinithj12/ds5220-weather:latest

@@ -15,7 +15,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: weather-tracker
-              image: ghcr.io/VinithJ12/ds5220-weather:latest
+              image: ghcr.io/vinithj12/ds5220-weather:latest
               imagePullPolicy: Always
               env:
                 - name: S3_BUCKET
