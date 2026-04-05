@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weather-tracker
+  namespace: default
+spec:
+  schedule: "0 * * * *"          # runs every hour
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 10
+  failedJobsHistoryLimit: 10
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: weather-tracker
+              image: ghcr.io/VinithJ12/ds5220-weather:latest
+              imagePullPolicy: Always
+              env:
+                - name: S3_BUCKET
+                  value: "vinith-ds5220 "
+
+                - name: AWS_REGION
+                  value: "us-east-1"
